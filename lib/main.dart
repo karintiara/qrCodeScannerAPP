@@ -1,10 +1,19 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:qr_code_scanner/qr_code_scanner.dart';
+import 'package:camera/camera.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:gallery_saver/gallery_saver.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter/services.dart';
 
-void main() => runApp(const MyApp());
+List<CameraDescription> cameras = [];
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  cameras = await availableCameras(); // Inisialisasi kamera dulu
+  runApp(const MyApp());
+}
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -25,42 +34,70 @@ class QRScannerScreen extends StatefulWidget {
 
 class _QRScannerScreenState extends State<QRScannerScreen> {
   final GlobalKey qrKey = GlobalKey(debugLabel: 'QR');
-  QRViewController? controller;
+  QRViewController? qrController;
+  CameraController? cameraController;
   Barcode? result;
-  bool isFrontCamera = true;
+  bool isFrontCamera = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    final camera = isFrontCamera ? cameras[1] : cameras[0];
+    cameraController = CameraController(camera, ResolutionPreset.medium);
+    await cameraController?.initialize();
+    setState(() {});
+  }
 
   @override
   void reassemble() {
     super.reassemble();
     if (Platform.isAndroid) {
-      controller!.pauseCamera();
+      qrController?.pauseCamera();
     }
-    controller!.resumeCamera();
+    qrController?.resumeCamera();
   }
 
   @override
   void dispose() {
-    controller?.dispose();
+    qrController?.dispose();
+    cameraController?.dispose();
     super.dispose();
   }
 
-  void _saveQrImage() async {
-    if (await Permission.storage.request().isGranted) {
-      final path = await controller?.takePicture();
-      if (path != null) {
-        await GallerySaver.saveImage(path.path);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('QR Code image saved to gallery')),
-        );
-      }
+  Future<void> _captureAndSaveImage() async {
+    if (cameraController == null || !cameraController!.value.isInitialized) return;
+
+    final status = await Permission.storage.request();
+    if (!status.isGranted) return;
+
+    final XFile file = await cameraController!.takePicture();
+    final directory = await getApplicationDocumentsDirectory();
+    final path = '${directory.path}/${DateTime.now().millisecondsSinceEpoch}.jpg';
+    await file.saveTo(path);
+    await GallerySaver.saveImage(path);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Gambar QR disimpan ke galeri')),
+    );
+  }
+
+  void _copyResultToClipboard() {
+    if (result != null) {
+      Clipboard.setData(ClipboardData(text: result!.code));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Hasil scan disalin ke clipboard')),
+      );
     }
   }
 
-  void _toggleCamera() async {
-    await controller?.flipCamera();
-    setState(() {
-      isFrontCamera = !isFrontCamera;
-    });
+  Future<void> _toggleCamera() async {
+    isFrontCamera = !isFrontCamera;
+    await qrController?.flipCamera();
+    await cameraController?.dispose();
+    await _initCamera();
   }
 
   @override
@@ -74,16 +111,22 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
         children: <Widget>[
           Expanded(
             flex: 5,
-            child: QRView(
-              key: qrKey,
-              onQRViewCreated: _onQRViewCreated,
-              overlay: QrScannerOverlayShape(
-                borderColor: Colors.red,
-                borderRadius: 10,
-                borderLength: 30,
-                borderWidth: 10,
-                cutOutSize: 250,
-              ),
+            child: Stack(
+              children: [
+                if (cameraController != null && cameraController!.value.isInitialized)
+                  CameraPreview(cameraController!),
+                QRView(
+                  key: qrKey,
+                  onQRViewCreated: _onQRViewCreated,
+                  overlay: QrScannerOverlayShape(
+                    borderColor: Colors.green,
+                    borderRadius: 10,
+                    borderLength: 30,
+                    borderWidth: 10,
+                    cutOutSize: 250,
+                  ),
+                ),
+              ],
             ),
           ),
           Expanded(
@@ -91,10 +134,7 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
             child: Column(
               children: [
                 if (result != null)
-                  Text(
-                    'Result: ${result!.code}',
-                    style: const TextStyle(fontSize: 18),
-                  )
+                  Text('Result: ${result!.code}', style: const TextStyle(fontSize: 18))
                 else
                   const Text('Scan a code', style: TextStyle(fontSize: 18)),
                 Row(
@@ -106,9 +146,14 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
                       label: const Text('Switch Camera'),
                     ),
                     ElevatedButton.icon(
-                      onPressed: _saveQrImage,
+                      onPressed: _captureAndSaveImage,
                       icon: const Icon(Icons.save),
-                      label: const Text('Save QR Image'),
+                      label: const Text('Save Image'),
+                    ),
+                    ElevatedButton.icon(
+                      onPressed: _copyResultToClipboard,
+                      icon: const Icon(Icons.copy),
+                      label: const Text('Copy Result'),
                     ),
                   ],
                 ),
@@ -121,7 +166,7 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
   }
 
   void _onQRViewCreated(QRViewController controller) {
-    this.controller = controller;
+    qrController = controller;
     controller.scannedDataStream.listen((scanData) {
       setState(() {
         result = scanData;
